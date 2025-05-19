@@ -1,0 +1,93 @@
+# 운영체제 및 IDE 관련 파일
+####################################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python 관련 파일
+####################################
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+*.manifest
+*.spec
+
+# 가상 환경 관련 파일
+####################################
+venv/
+env/
+.env
+.venv
+ENV/
+
+# 데이터 파일 (대용량 데이터는 Git LFS 사용을 권장)
+####################################
+*.csv
+*.json
+*.xml
+*.txt # 데이터셋 텍스트 파일 (필요에 따라 주석 해제)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.avi
+data/ # 데이터 디렉토리 전체 (필요에 따라 주석 해제)
+raw_data/
+processed_data/
+
+# 모델 파일 및 체크포인트
+####################################
+*.pt
+*.pth
+*.h5
+*.pb
+*.onnx
+models/
+checkpoints/
+saved_models/
+
+# 로그 파일
+####################################
+*.log
+logs/
+
+# Jupyter Notebook 체크포인트
+####################################
+.ipynb_checkpoints/
+
+# 캐시 파일
+####################################
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 기타 임시 파일 및 디렉토리
+####################################
+temp/
+tmp/
+output/
+results/
+
+# 민감 정보 파일 (API 키, 비밀번호 등) - 절대로 Git에 추가하지 마세요!
+####################################
+secrets.yml
+config.ini # 민감 정보 포함 시
+*.env # 환경 변수 파일 (위에서 이미 정의했지만, 명시적으로 다시 한번)
+
+# 특정 라이브러리 및 도구 관련 파일
+####################################
+# 예: MLflow
+# mlruns/
+# .mlflow-EXPERIMENT_NAME-IDENTIFIER/
+
+# 예: DVC (Data Version Control) - .dvcignore 사용 권장
+# .dvc/cache/

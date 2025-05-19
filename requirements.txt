@@ -1,0 +1,11 @@
+pytorch
+lightning
+numpy
+pandas
+scikit-learn
+scipy
+
+optuna
+optuna-dashboard
+tensorboard
+rich
