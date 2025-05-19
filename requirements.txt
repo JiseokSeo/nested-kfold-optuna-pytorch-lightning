@@ -1,12 +1,10 @@
 pytorch
 lightning
-numpy
 pandas
 scikit-learn
 scipy
+albumentations
 
 optuna
 optuna-dashboard
 tensorboard
-
-????
