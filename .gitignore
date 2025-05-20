@@ -33,14 +33,14 @@ ENV/
 *.csv
 *.json
 *.xml
-*.txt # 데이터셋 텍스트 파일 (필요에 따라 주석 해제)
 *.jpg
 *.jpeg
 *.png
 *.gif
 *.mp4
 *.avi
-data/ # 데이터 디렉토리 전체 (필요에 따라 주석 해제)
+data/ # 데이터 디렉토리 전체
+result/
 raw_data/
 processed_data/
 

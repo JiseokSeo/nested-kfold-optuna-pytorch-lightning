@@ -76,23 +76,23 @@ def get_trial_params(trial: optuna.Trial, config) -> dict:
         trial_params["trainer.gradient_clip_val"] = None
 
     # --- 스케줄러 (고정 및 핵심 파라미터 탐색) ---
-    use_scheduler = trial.suggest_categorical("trainer.use_scheduler", [True, False])
-    trial_params["trainer.use_scheduler"] = use_scheduler
+    # use_scheduler = trial.suggest_categorical("trainer.use_scheduler", [True, False])
+    # trial_params["trainer.use_scheduler"] = use_scheduler
 
-    if use_scheduler:
-        trial_params["trainer.scheduler.name"] = "OneCycleLR"  # 고정
-        trial_params["trainer.scheduler.params.pct_start"] = trial.suggest_float(
-            "trainer.scheduler.pct_start", 0.1, 0.5, step=0.05
-        )
-        trial_params["trainer.scheduler.params.div_factor"] = trial.suggest_float(
-            "trainer.scheduler.div_factor", 10.0, 50.0, step=5.0
-        )
-        trial_params["trainer.scheduler.params.final_div_factor"] = trial.suggest_float(
-            "trainer.scheduler.final_div_factor", 1e3, 1e5, log=True
-        )
-    else:
-        trial_params["trainer.scheduler.name"] = None
-        trial_params["trainer.scheduler.params"] = {}
+    # if use_scheduler:
+    #     trial_params["trainer.scheduler.name"] = "OneCycleLR"  # 고정
+    #     trial_params["trainer.scheduler.params.pct_start"] = trial.suggest_float(
+    #         "trainer.scheduler.pct_start", 0.1, 0.5, step=0.05
+    #     )
+    #     trial_params["trainer.scheduler.params.div_factor"] = trial.suggest_float(
+    #         "trainer.scheduler.div_factor", 10.0, 50.0, step=5.0
+    #     )
+    #     trial_params["trainer.scheduler.params.final_div_factor"] = trial.suggest_float(
+    #         "trainer.scheduler.final_div_factor", 1e3, 1e5, log=True
+    #     )
+    # else:
+    #     trial_params["trainer.scheduler.name"] = None
+    #     trial_params["trainer.scheduler.params"] = {}
 
     # --- 손실 함수 (고정) ---
     trial_params["trainer.criterion.name"] = "BCEWithLogitsLoss"

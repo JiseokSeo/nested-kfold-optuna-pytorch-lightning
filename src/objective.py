@@ -4,8 +4,8 @@ from src.utils import get_fitted_scaler, do_scaling, save_scaler
 from src.model_modules.builder import build_model_from_config
 from src.data_modules.builder import build_data
 from src.trainer.builder import build_trainer_from_config
-from src.trainer.scheduler_utils import get_one_cycle_lr_params
-from src.trainer.callbacks import BestModelCallback
+from src.trainer.callbacks import InMemoryBestModelSaver
+from pytorch_lightning.callbacks import EarlyStopping
 import os
 import logging
 import torch
@@ -40,7 +40,7 @@ def objective(
         n_splits=n_inner_folds, shuffle=True, random_state=config.get("seed", 42)
     )
     inner_scores = []
-    checkpoint_for_final_logging = None
+    best_epochs = []
 
     for inner_fold_idx, (inner_train_idx, inner_val_idx) in enumerate(
         inner_kf.split(train_data, y)
@@ -66,16 +66,22 @@ def objective(
         model = build_model_fn(trial_config)
         logger.info(f"[Objective] Model built: {type(model).__name__}")
 
-        trainer_instance, current_checkpoint = build_trainer_fn(
+        in_memory_callback = InMemoryBestModelSaver(monitor="val_loss", mode="min")
+        early_stopping_callback = EarlyStopping(
+            monitor=trial_config["trainer"]["metric_to_monitor"],
+            patience=trial_config["trainer"]["early_stopping_patience"],
+            mode=trial_config["trainer"]["monitor_mode"],
+            verbose=False,
+        )
+        callbacks = [in_memory_callback, early_stopping_callback]
+
+        trainer = build_trainer_fn(
             trial_config,
             fold_idx=inner_fold_idx,
             reproducible=reproducible,
             debug=debug,
+            callbacks=callbacks,
         )
-        if inner_fold_idx == n_inner_folds - 1:
-            checkpoint_for_final_logging = current_checkpoint
-
-        trial_config["_trainer_instance"] = trainer_instance
 
         scaler = get_fitted_scaler(trial_config, inner_train)
         use_csv_flag = trial_config.get("data", {}).get("use_csv", False)
@@ -182,37 +188,10 @@ def objective(
                 f"[Objective] val_dataloader is None for inner_fold {inner_fold_idx}. Validation will be skipped."
             )
 
-        use_scheduler_flag = trial_config.get("trainer", {}).get("use_scheduler", True)
-
-        if use_scheduler_flag:
-            scheduler_params = get_one_cycle_lr_params(trial_config, train_dataloader)
-            if scheduler_params:
-                logger.info(f"Objective: Setting scheduler params: {scheduler_params}")
-                model.set_scheduler_params(**scheduler_params)
-            else:
-                logger.warning(
-                    "Objective: Scheduler params not set or not applicable (e.g., scheduler name is None or utils returned None). Scheduler will not be set."
-                )
-        else:
-            logger.info("Objective: use_scheduler is False. Skipping scheduler setup.")
-
-        if "_trainer_instance" in trial_config:
-            del trial_config["_trainer_instance"]
-
-        if (
-            current_checkpoint
-            and hasattr(current_checkpoint, "best_model_state_dict")
-            and current_checkpoint.best_model_state_dict
-        ):
-            logger.info(
-                f"[Objective] Loading best model state_dict from checkpoint for model {type(model).__name__}"
-            )
-            model.load_state_dict(current_checkpoint.best_model_state_dict)
-
         if debug or True:
             logger.info(f"[INFO] Trainer.fit() 시작 (inner_fold {inner_fold_idx})")
         try:
-            trainer_instance.fit(model, train_dataloader, val_dataloader)
+            trainer.fit(model, train_dataloader, val_dataloader)
             logger.info(
                 f"[OBJECTIVE_FIT_END] Trial {trial.number if trial else 'N/A'}, Inner Fold {inner_fold_idx}: Finished trainer.fit() for model {type(model).__name__}"
             )
@@ -234,70 +213,28 @@ def objective(
             )
             raise
 
-        best_model_cb = None
-        for cb in trainer_instance.callbacks:
-            if isinstance(cb, BestModelCallback):
-                best_model_cb = cb
-                break
-
-        if best_model_cb and best_model_cb.best_model_state_dict:
-            logger.info(
-                f"[Objective] Loading best model state_dict for validation. Best score: {best_model_cb.best_score} at epoch {best_model_cb.best_epoch}"
-            )
-            model.load_state_dict(best_model_cb.best_model_state_dict)
-        else:
-            logger.error(
-                f"[Objective] CRITICAL: No best model state_dict found from BestModelCallback for {type(model).__name__}. "
-                f"Callback state: monitor='{best_model_cb.monitor if best_model_cb else 'N/A'}', score={best_model_cb.best_score if best_model_cb else 'N/A'}"
-            )
-
         if debug or True:
-            logger.info(f"[INFO] Trainer.validate() 시작 (inner_fold {inner_fold_idx})")
-        val_metrics = trainer_instance.validate(
-            model, dataloaders=val_dataloader, verbose=False
-        )
-        if debug or True:
-            logger.info(f"[INFO] Trainer.validate() 종료 (inner_fold {inner_fold_idx})")
-        if debug:
-            logger.debug(f"[DEBUG] Validation metrics: {val_metrics}")
-            if hasattr(model, "val_logits"):
-                logger.debug(
-                    f"[DEBUG] 예측 샘플: {getattr(model, 'val_logits', [])[:3]}"
-                )
+            logger.info(f"[INFO] 최종모델 검증 시작 (inner_fold {inner_fold_idx})")
+        metrics = trainer.test(model, val_dataloader)
+        inner_scores.append(metrics["test_auroc"])
 
-        current_score = 0.0
-        if val_metrics:
-            fetched_score = val_metrics[0].get(metric_key)
-
-            if fetched_score is not None:
-                current_score = fetched_score
-                logger.info(
-                    f"[Objective] Using '{metric_key}' for current_score: {current_score}"
-                )
-            else:
-                logger.warning(
-                    f"[Objective] Metric '{metric_key}' not found in val_metrics[0]: {val_metrics[0].keys()}. Trying 'val_loss'."
-                )
-                current_score = val_metrics[0].get("val_loss", 0.0)
-                logger.info(
-                    f"[Objective] Used fallback 'val_loss' for current_score: {current_score}"
-                )
-        else:
+        # InMemoryBestModelSaver.best_epoch는 텐서일 수 있으므로 .item()으로 Python 숫자로 변환
+        current_best_epoch = in_memory_callback.best_epoch
+        if torch.is_tensor(current_best_epoch):
+            best_epochs.append(current_best_epoch.item())
+        elif isinstance(current_best_epoch, (int, float)):
+            best_epochs.append(current_best_epoch)  # 이미 숫자면 그대로 사용
+        else:  # 예상치 못한 타입이면 -1 또는 적절한 기본값 사용 및 경고
             logger.warning(
-                f"[Objective] trainer.validate() returned empty metrics list for inner_fold {inner_fold_idx}. Using score 0.0."
+                f"Unexpected type for best_epoch: {type(current_best_epoch)}. Storing -1."
             )
-
-        logger.info(
-            f"[Objective] Inner fold {inner_fold_idx} completed. Score: {current_score}"
-        )
-        inner_scores.append(current_score)
+            best_epochs.append(-1)
 
     trial.set_user_attr("inner_scores", inner_scores)
+    trial.set_user_attr("best_epochs", best_epochs)
     # best_epoch 저장
-    if best_model_cb is not None:
-        trial.set_user_attr("best_epoch", best_model_cb.best_epoch)
     final_score = np.mean(inner_scores)
     logger.info(
-        f"[Objective] Trial finished. Average score over inner folds ({metric_key}): {final_score}"
+        f"[Objective] Trial finished. Average score over inner folds (val_auc): {final_score}"
     )
     return final_score

@@ -12,7 +12,7 @@ from src.model_modules.components.image_extractor import ImageExtractor
 from src.model_modules.components.csv_extractor import MLPCSVExtractor
 from src.model_modules.components.fusion import ConcatFusion, GatingFusion, FusionLayer
 from src.model_modules.components.classifier import MLPClassifier
-from src.trainer.metrics import calculate_metrics
+from src.trainer.metrics import test_metrics
 
 
 class MultiModalModel(BaseModel):
@@ -131,9 +131,6 @@ class MultiModalModel(BaseModel):
             f"[MultiModalModel __init__] Criterion '{criterion_name}' created with params {criterion_params}."
         )
 
-        self.one_cycle_total_steps = None
-        self.one_cycle_max_lr = None
-        self.one_cycle_additional_params = {}
         logger.info("[MultiModalModel __init__] END")
 
     def forward(self, image=None, csv=None):
@@ -257,59 +254,6 @@ class MultiModalModel(BaseModel):
         )
         logger.info(f"[V_EPOCH_END] Logged PTL metric 'val_loss': {val_loss.item()}")
 
-        # 다른 메트릭들 계산 및 로깅
-        logits_np = all_logits.numpy()
-        targets_np = all_targets.numpy()
-        metrics = calculate_metrics(logits_np, targets_np, prefix="val_")
-        logger.info(
-            f"[V_EPOCH_END] Metrics calculated by calculate_metrics: {list(metrics.keys())}"
-        )
-
-        monitored_metric_name = self.trainer_config_hparams.get(
-            "metric_to_monitor", "val_custom"
-        )
-        logger.info(
-            f"[V_EPOCH_END] Metric to monitor (from config trainer.metric_to_monitor): '{monitored_metric_name}'"
-        )
-
-        current_batch_size = self.batch_size
-        for k, v in metrics.items():
-            self.log(k, v, on_epoch=True, prog_bar=True, batch_size=current_batch_size)
-            logger.info(f"[V_EPOCH_END] Logged PTL metric '{k}': {v}")
-
-        # EarlyStopping이 사용할 monitored_metric_name이 실제로 로깅되었는지 확인
-        if monitored_metric_name in metrics:
-            logger.info(
-                f"[V_EPOCH_END] Monitored metric '{monitored_metric_name}' (value: {metrics[monitored_metric_name]}) is present in calculated metrics and was logged."
-            )
-        else:
-            logger.warning(
-                f"[V_EPOCH_END] Monitored metric '{monitored_metric_name}' was NOT FOUND in calculated metrics ({list(metrics.keys())}). "
-                f"EarlyStopping might fail if it relies on this metric name directly via self.log()."
-            )
-
-        # 콜백이 접근 가능한 최종 메트릭 목록 로깅
-        if (
-            self.trainer
-            and hasattr(self.trainer, "callback_metrics")
-            and self.trainer.callback_metrics
-        ):
-            logger.info(
-                f"[V_EPOCH_END] Final metrics available in trainer.callback_metrics: {list(self.trainer.callback_metrics.keys())}"
-            )
-            if monitored_metric_name not in self.trainer.callback_metrics:
-                logger.warning(
-                    f"[V_EPOCH_END] CRITICAL: Monitored metric '{monitored_metric_name}' IS NOT in trainer.callback_metrics! EarlyStopping WILL LIKELY FAIL."
-                )
-            else:
-                logger.info(
-                    f"[V_EPOCH_END] Monitored metric '{monitored_metric_name}' IS PRESENT in trainer.callback_metrics."
-                )
-        else:
-            logger.info(
-                "[V_EPOCH_END] trainer.callback_metrics not available or empty at the end of on_validation_epoch_end."
-            )
-
         # 사용된 로그 및 타겟 리스트 초기화
         self.val_logits = []
         self.val_targets = []
@@ -318,110 +262,135 @@ class MultiModalModel(BaseModel):
         image = batch["image"]
         csv = batch["csv"]
         target = batch["target"]
+        image_id = batch["image_id"]
         logits = self.forward(image=image, csv=csv)
-        loss = self.criterion(logits.squeeze(), target.float())
-        current_batch_size = self.batch_size
-        self.log(
-            "test_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=current_batch_size,
-        )
-        logits_np = logits.detach().cpu().numpy()
-        target_np = target.detach().cpu().numpy()
-        metrics = calculate_metrics(logits_np, target_np, prefix="test_")
-        for k, v in metrics.items():
-            self.log(k, v, on_epoch=True, prog_bar=True, batch_size=current_batch_size)
-        print(f"test_loss: {loss}, test_auroc: {metrics['test_auroc']}")
-        return {"test_loss": loss, "logits": logits.detach(), "target": target.detach()}
 
-    def set_scheduler_params(
-        self, total_steps: int, max_lr: float, additional_params: Optional[Dict] = None
-    ):
-        self.one_cycle_total_steps = total_steps
-        self.one_cycle_max_lr = max_lr
-        if additional_params:
-            self.one_cycle_additional_params = additional_params
+        if not hasattr(self, "test_logits"):
+            self.test_logits = []
+            self.test_targets = []
+            self.image_ids = []
+
+        self.test_logits.append(logits.detach().cpu())
+        self.test_targets.append(target.detach().cpu())
+        self.image_ids.append(image_id.detach().cpu())
+
+    def on_test_epoch_end(self):
+        logger.info("[TEST_EPOCH_END] START")
+        if (
+            not hasattr(self, "test_logits")
+            or not hasattr(self, "test_targets")
+            or not self.test_logits
+            or not self.test_targets
+        ):
+            logger.warning(
+                "[TEST_EPOCH_END] test_logits or test_targets is missing or empty. Skipping metric calculation."
+            )
+            # Ensure lists are cleared/initialized even if they were partially populated or just initialized
+            self.test_logits = []
+            self.test_targets = []
+            self.image_ids = []
+            logger.info("[TEST_EPOCH_END] END (skipped)")
+            return
+
+        all_logits = torch.cat(self.test_logits, dim=0)
+        all_targets = torch.cat(self.test_targets, dim=0)
+        all_image_ids = torch.cat(self.image_ids, dim=0)
+
+        # test_loss 로깅
+        try:
+            # Ensure batch_size is available, default to a common value or handle if not critical for prog_bar
+            current_batch_size = self.batch_size if hasattr(self, "batch_size") else 1
+            test_loss = self.criterion(all_logits.squeeze(), all_targets.float())
+            self.log(
+                "test_loss",
+                test_loss,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=current_batch_size,
+            )
+            logger.info(
+                f"[TEST_EPOCH_END] Logged PTL metric 'test_loss': {test_loss.item()}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[TEST_EPOCH_END] Error calculating or logging test_loss: {e}"
+            )
+            # Decide if we should proceed or return
+            # For now, let's log and proceed to other metrics if possible
+
+        # 다른 메트릭들 계산 및 로깅
+        try:
+            logits_np = all_logits.numpy()
+            targets_np = all_targets.numpy()
+            metrics = test_metrics(logits_np, targets_np, prefix="test_")
+            logger.info(
+                f"[TEST_EPOCH_END] Metrics calculated by calculate_metrics: {list(metrics.keys())}"
+            )
+
+            current_batch_size = self.batch_size if hasattr(self, "batch_size") else 1
+            for k, v in metrics.items():
+                self.log(
+                    k, v, on_epoch=True, prog_bar=True, batch_size=current_batch_size
+                )
+                logger.info(f"[TEST_EPOCH_END] Logged PTL metric '{k}': {v}")
+
+            return {
+                "test_loss": test_loss,
+                "test_auroc": metrics["test_auroc"],
+                "test_f1": metrics["test_f1"],
+                "test_TP": metrics["test_TP"],
+                "test_TN": metrics["test_TN"],
+                "test_FP": metrics["test_FP"],
+                "test_FN": metrics["test_FN"],
+                "logits": all_logits,
+                "target": all_targets,
+                "image_ids": all_image_ids,
+            }
+
+        except Exception as e:
+            logger.error(
+                f"[TEST_EPOCH_END] Error calculating or logging other metrics: {e}"
+            )
+
+        # 사용된 로그 및 타겟 리스트 초기화
+        self.test_logits = []
+        self.test_targets = []
+        logger.info("[TEST_EPOCH_END] END")
 
     def configure_optimizers(self):
         logger.info("[CONFIGURE_OPTIMIZERS] START")
+
+        # 옵티마이저 설정 로드 및 생성
         optim_cfg = self.trainer_config_hparams.get(
-            "optimizer", {"name": "AdamW", "params": {}}
+            "optimizer", {"name": "AdamW", "params": {"lr": 1e-3}}
         )
         optim_name = optim_cfg.get("name", "AdamW")
+        optim_params = optim_cfg.get("params", {}).copy()  # 원본 변경 방지를 위해 복사
 
-        default_lr = optim_cfg.get("params", {}).get("lr", 1e-3)
-
-        current_max_lr_for_scheduler = (
-            self.one_cycle_max_lr if self.one_cycle_max_lr is not None else default_lr
-        )
-
-        optimizer_initial_lr = default_lr
-
-        final_optim_params = optim_cfg.get("params", {}).copy()
-        final_optim_params["lr"] = optimizer_initial_lr
+        if "lr" not in optim_params:  # lr이 명시적으로 없으면 기본값 사용
+            optim_params["lr"] = 1e-3
+            logger.warning(
+                f"Optimizer learning rate not found in config, using default: {optim_params['lr']}"
+            )
 
         if optim_name == "AdamW":
-            optimizer = torch.optim.AdamW(self.parameters(), **final_optim_params)
-        elif optim_name == "Adam":
-            optimizer = torch.optim.Adam(self.parameters(), **final_optim_params)
+            optimizer = torch.optim.AdamW(self.parameters(), **optim_params)
+        # elif optim_name == "Adam": # 사용자에 의해 삭제된 부분
+        #     optimizer = torch.optim.Adam(self.parameters(), **optim_params)
         else:
+            logger.error(f"Unsupported optimizer: {optim_name}")
             raise NotImplementedError(f"지원하지 않는 optimizer: {optim_name}")
+        logger.info(f"Optimizer '{optim_name}' created with params: {optim_params}")
 
-        # hparams에서 use_scheduler 플래그 확인 (기본값 True로 설정하여 호환성 유지)
-        use_scheduler_flag = self.trainer_config_hparams.get("use_scheduler", True)
+        # 스케줄러 관련 코드 전체 삭제
+        # scheduler_cfg = self.trainer_config_hparams.get("scheduler")
 
-        if not use_scheduler_flag:
-            print(
-                "configure_optimizers: use_scheduler is False. Returning optimizer only."
-            )
-            logger.info(
-                "[CONFIGURE_OPTIMIZERS] use_scheduler is False. Returning optimizer only."
-            )
-            logger.info(f"[CONFIGURE_OPTIMIZERS] Optimizer object: {optimizer}")
-            return optimizer
+        # if scheduler_cfg and scheduler_cfg.get("name") == "OneCycleLR":
+        #    ... (기존 스케줄러 로직 모두 삭제)
+        # else:
+        #    ... (기존 else 로직 모두 삭제)
 
-        scheduler_cfg_from_hparams = self.trainer_config_hparams.get("scheduler")
-
-        if (
-            self.one_cycle_total_steps
-            and self.one_cycle_max_lr
-            and scheduler_cfg_from_hparams
-            and scheduler_cfg_from_hparams.get("name") == "OneCycleLR"
-        ):
-            print(
-                f"MultimodalModel: Configuring OneCycleLR scheduler in configure_optimizers with max_lr={current_max_lr_for_scheduler}, total_steps={self.one_cycle_total_steps}"
-            )
-
-            defined_scheduler_params = scheduler_cfg_from_hparams.get(
-                "params", {}
-            ).copy()
-            defined_scheduler_params.update(self.one_cycle_additional_params)
-
-            lr_scheduler_config = {
-                "scheduler": torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=current_max_lr_for_scheduler,
-                    total_steps=self.one_cycle_total_steps,
-                    **defined_scheduler_params,
-                ),
-                "interval": "step",
-                "frequency": 1,
-                "name": "one_cycle_lr_model_managed",
-            }
-            logger.info(f"[CONFIGURE_OPTIMIZERS] Optimizer object: {optimizer}")
-            logger.info(
-                f"[CONFIGURE_OPTIMIZERS] LR Scheduler config: {lr_scheduler_config}"
-            )
-            return [optimizer], [lr_scheduler_config]
-        else:
-            print(
-                "configure_optimizers: Scheduler conditions not met or scheduler not OneCycleLR. Returning optimizer only."
-            )
-            logger.info(
-                "[CONFIGURE_OPTIMIZERS] Scheduler conditions not met or scheduler not OneCycleLR. Returning optimizer only."
-            )
-            logger.info(f"[CONFIGURE_OPTIMIZERS] Optimizer object: {optimizer}")
-            return optimizer
+        logger.info("[CONFIGURE_OPTIMIZERS] No scheduler will be used as per request.")
+        logger.info(f"[CONFIGURE_OPTIMIZERS] Optimizer: {optimizer}")
+        logger.info("[CONFIGURE_OPTIMIZERS] END")
+        return optimizer
