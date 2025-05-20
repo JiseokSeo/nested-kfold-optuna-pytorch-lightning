@@ -282,23 +282,6 @@ class MultiModalModel(BaseModel):
             logger.info(
                 f"[V_EPOCH_END] Monitored metric '{monitored_metric_name}' (value: {metrics[monitored_metric_name]}) is present in calculated metrics and was logged."
             )
-        # 기존의 val_custom <-> val_auroc 연동 로직 (만약 monitored_metric_name이 'val_custom'이고, 'val_auroc'만 계산된 경우)
-        elif (
-            monitored_metric_name == "val_custom"
-            and "val_auroc" in metrics
-            and "val_custom" not in metrics
-        ):
-            val_auroc_value = metrics["val_auroc"]
-            self.log(
-                "val_custom",
-                val_auroc_value,
-                on_epoch=True,
-                prog_bar=True,
-                batch_size=current_batch_size,
-            )
-            logger.info(
-                f"[V_EPOCH_END] Monitored metric was 'val_custom', not in metrics. Logged 'val_custom' using 'val_auroc' value: {val_auroc_value}"
-            )
         else:
             logger.warning(
                 f"[V_EPOCH_END] Monitored metric '{monitored_metric_name}' was NOT FOUND in calculated metrics ({list(metrics.keys())}). "
