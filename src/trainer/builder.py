@@ -47,7 +47,7 @@ def build_trainer_from_config(
         enable_model_summary=True,
         enable_progress_bar=True,
         log_every_n_steps=1,
-        enable_checkpointing=False,
+        enable_checkpointing=True,
         gradient_clip_val=gradient_clip_value,
         num_sanity_val_steps=0,
         fast_dev_run=fast_dev_run,

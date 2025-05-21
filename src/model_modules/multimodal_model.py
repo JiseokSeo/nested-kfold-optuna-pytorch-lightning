@@ -18,7 +18,6 @@ from src.trainer.metrics import test_metrics
 class MultiModalModel(BaseModel):
     def __init__(self, config: Dict):
         super().__init__()
-        logger.info("[MultiModalModel __init__] START")
         self.save_hyperparameters(config)
         self.model_config = self.hparams.get("model", {})
         self.data_config = self.hparams.get("data", {})
@@ -53,9 +52,6 @@ class MultiModalModel(BaseModel):
             self.image_extractor = ImageExtractor(img_ext_config)
             image_dim = self.image_extractor.output_dim
             current_dim = image_dim
-            logger.info(
-                f"[MultiModalModel __init__] ImageExtractor created. Output_dim: {image_dim}"
-            )
 
         if self.use_csv:
             csv_ext_config = self.model_config.get("csv_extractor")
@@ -68,9 +64,6 @@ class MultiModalModel(BaseModel):
             csv_dim = self.csv_extractor.output_dim
             if not self.use_image:
                 current_dim = csv_dim
-            logger.info(
-                f"[MultiModalModel __init__] MLPCSVExtractor created. Output_dim: {csv_dim}"
-            )
 
         if self.use_image and self.use_csv and self.model_config.get("fusion"):
             fusion_config = self.model_config["fusion"]
@@ -80,14 +73,8 @@ class MultiModalModel(BaseModel):
             fusion_config["params"]["csv_dim"] = csv_dim
             self.fusion_layer = FusionLayer(fusion_config)
             current_dim = self.fusion_layer.output_dim
-            logger.info(
-                f"[MultiModalModel __init__] FusionLayer created. Output_dim: {current_dim}"
-            )
         elif self.use_image and self.use_csv and not self.model_config.get("fusion"):
             current_dim = image_dim + csv_dim
-            logger.info(
-                f"[MultiModalModel __init__] Fusion not used, current_dim (sum of image/csv): {current_dim}"
-            )
 
         if self.model_config.get("classifier"):
             classifier_config = self.model_config["classifier"]
@@ -101,7 +88,6 @@ class MultiModalModel(BaseModel):
                 )
             classifier_config["params"]["num_classes"] = num_classes
             self.classifier = MLPClassifier(classifier_config)
-            logger.info("[MultiModalModel __init__] MLPClassifier created.")
         else:
             raise ValueError("Classifier must be specified in the model config.")
 
@@ -117,21 +103,11 @@ class MultiModalModel(BaseModel):
         criterion_params = criterion_cfg.get("params", {})
         if criterion_name == "BCEWithLogitsLoss":
             self.criterion = nn.BCEWithLogitsLoss(**criterion_params)
-            logger.info(
-                f"[MultiModalModel __init__] Criterion '{criterion_name}' created."
-            )
         elif criterion_name == "CrossEntropyLoss":
             self.criterion = nn.CrossEntropyLoss(**criterion_params)
-            logger.info(
-                f"[MultiModalModel __init__] Criterion '{criterion_name}' created."
-            )
+
         else:
             raise NotImplementedError(f"지원하지 않는 손실 함수: {criterion_name}")
-        logger.info(
-            f"[MultiModalModel __init__] Criterion '{criterion_name}' created with params {criterion_params}."
-        )
-
-        logger.info("[MultiModalModel __init__] END")
 
     def forward(self, image=None, csv=None):
         features = None
@@ -169,18 +145,12 @@ class MultiModalModel(BaseModel):
         return logits
 
     def training_step(self, batch, batch_idx):
-        logger.info(
-            f"[TRAINING_STEP] START - Epoch {self.current_epoch}, Batch {batch_idx}"
-        )
         image = batch["image"]
         csv = batch["csv"]
         target = batch["target"]
         logits = self.forward(image=image, csv=csv)
         loss = self.criterion(logits.squeeze(), target.float())
 
-        logger.info(
-            f"[TRAINING_STEP] Calculated loss: {loss.item()} - Epoch {self.current_epoch}, Batch {batch_idx}"
-        )
         if torch.isnan(loss) or torch.isinf(loss):
             logger.error(
                 f"[TRAINING_STEP] CRITICAL: NaN or Inf loss detected! Loss: {loss.item()}. Epoch {self.current_epoch}, Batch {batch_idx}"
@@ -195,9 +165,6 @@ class MultiModalModel(BaseModel):
             on_epoch=True,
             prog_bar=True,
             batch_size=self.batch_size,
-        )
-        logger.info(
-            f"[TRAINING_STEP] END - Epoch {self.current_epoch}, Batch {batch_idx}"
         )
         return loss
 
@@ -252,7 +219,7 @@ class MultiModalModel(BaseModel):
             prog_bar=True,
             batch_size=self.batch_size,
         )
-        logger.info(f"[V_EPOCH_END] Logged PTL metric 'val_loss': {val_loss.item()}")
+        logger.info(f"[V_EPOCH_END] 'val_loss': {val_loss.item():.4f}")
 
         # 사용된 로그 및 타겟 리스트 초기화
         self.val_logits = []
@@ -272,29 +239,54 @@ class MultiModalModel(BaseModel):
 
         self.test_logits.append(logits.detach().cpu())
         self.test_targets.append(target.detach().cpu())
-        self.image_ids.append(image_id.detach().cpu())
+
+        # image_id는 일반적으로 DataLoader에 의해 리스트 형태로 전달됨 (예: [id_1, id_2, ...])
+        # dataset.py에서 각 아이템의 image_id는 str 또는 int일 가능성이 높음
+        if isinstance(image_id, list):  # DataLoader가 ID들을 리스트로 묶어 전달한 경우
+            self.image_ids.extend(image_id)
+        elif isinstance(image_id, (str, int, float)):
+            # 만약 image_id가 단일 값으로 전달되는 예외적인 상황이라면 (배치 크기가 1이거나 특별한 collate_fn)
+            self.image_ids.append(image_id)
+        elif torch.is_tensor(image_id):
+            # 텐서로 오는 경우는 거의 없겠지만, 만약을 위해 tolist()로 변환하여 extend
+            self.image_ids.extend(image_id.detach().cpu().tolist())
+        else:
+            # 예상치 못한 타입일 경우 경고 로깅 후 시도
+            logger.warning(
+                f"[TEST_STEP] Unexpected type for image_id: {type(image_id)}. Attempting to extend."
+            )
+            try:
+                self.image_ids.extend(list(image_id))  # 반복 가능한 객체일 경우를 대비
+            except TypeError:
+                logger.error(
+                    f"[TEST_STEP] Failed to extend image_ids with type: {type(image_id)}."
+                )
+                self.image_ids.append(
+                    str(image_id)
+                )  # 최후의 수단으로 문자열 변환 후 추가
 
     def on_test_epoch_end(self):
-        logger.info("[TEST_EPOCH_END] START")
         if (
             not hasattr(self, "test_logits")
             or not hasattr(self, "test_targets")
             or not self.test_logits
             or not self.test_targets
         ):
-            logger.warning(
+            logger.error(
                 "[TEST_EPOCH_END] test_logits or test_targets is missing or empty. Skipping metric calculation."
             )
             # Ensure lists are cleared/initialized even if they were partially populated or just initialized
             self.test_logits = []
             self.test_targets = []
             self.image_ids = []
-            logger.info("[TEST_EPOCH_END] END (skipped)")
-            return
+            logger.error("[TEST_EPOCH_END] END (skipped)")
+            raise ValueError(
+                "[TEST_EPOCH_END] test_logits or test_targets is missing or empty."
+            )
 
         all_logits = torch.cat(self.test_logits, dim=0)
         all_targets = torch.cat(self.test_targets, dim=0)
-        all_image_ids = torch.cat(self.image_ids, dim=0)
+        all_image_ids = self.image_ids
 
         # test_loss 로깅
         try:

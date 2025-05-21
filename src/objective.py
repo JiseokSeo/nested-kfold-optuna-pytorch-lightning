@@ -4,8 +4,6 @@ from src.utils import get_fitted_scaler, do_scaling, save_scaler
 from src.model_modules.builder import build_model_from_config
 from src.data_modules.builder import build_data
 from src.trainer.builder import build_trainer_from_config
-from src.trainer.callbacks import InMemoryBestModelSaver
-from pytorch_lightning.callbacks import EarlyStopping
 import os
 import logging
 import torch
@@ -29,7 +27,7 @@ def objective(
     debug: bool = False,
 ):
     """
-    Optuna objective 함수. 빌더 함수들을 인자로 받아 동적으로 객체를 생성.
+    Optuna objective 함수. ModelCheckpoint를 사용하여 최적 모델 가중치를 관리.
     """
     from configs.search_range import get_trial_params
     from src.utils import merge_config
@@ -40,40 +38,56 @@ def objective(
         n_splits=n_inner_folds, shuffle=True, random_state=config.get("seed", 42)
     )
     inner_scores = []
-    best_epochs = []
+    all_inner_best_epochs_approx = []
 
     for inner_fold_idx, (inner_train_idx, inner_val_idx) in enumerate(
         inner_kf.split(train_data, y)
     ):
+        logger.info(
+            f"[Objective] Starting Inner Fold {inner_fold_idx + 1}/{n_inner_folds}"
+        )
 
-        inner_train = train_data.iloc[inner_train_idx]
-        inner_val = train_data.iloc[inner_val_idx]
+        inner_train_df = train_data.iloc[inner_train_idx]
+        inner_val_df = train_data.iloc[inner_val_idx]
         if debug:
             logger.debug(
-                f"[DEBUG] Inner fold {inner_fold_idx} input data 샘플:\n{inner_train.head(3)}"
+                f"[DEBUG] Inner fold {inner_fold_idx} input data 샘플:\n{inner_train_df.head(3)}"
             )
             logger.debug(
-                f"[DEBUG] Inner fold {inner_fold_idx} input data shape: {inner_train.shape}"
+                f"[DEBUG] Inner fold {inner_fold_idx} input data shape: {inner_train_df.shape}"
             )
         logger.info(
-            f"[Objective] Inner fold {inner_fold_idx}: inner_train shape: {inner_train.shape}, inner_val shape: {inner_val.shape}"
+            f"[Objective] Inner fold {inner_fold_idx}: inner_train shape: {inner_train_df.shape}, inner_val shape: {inner_val_df.shape}"
         )
-        if inner_val.empty:
+        if inner_val_df.empty:
             logger.warning(
                 f"[Objective] CRITICAL: inner_val is EMPTY for inner_fold {inner_fold_idx}. Validation will likely not run or be effective."
             )
 
         model = build_model_fn(trial_config)
-        logger.info(f"[Objective] Model built: {type(model).__name__}")
+        logger.info(
+            f"[Objective] Inner Fold {inner_fold_idx}: Model built: {type(model).__name__}"
+        )
 
-        in_memory_callback = InMemoryBestModelSaver(monitor="val_loss", mode="min")
-        early_stopping_callback = EarlyStopping(
-            monitor=trial_config["trainer"]["metric_to_monitor"],
+        monitor_metric = trial_config["trainer"].get("metric_to_monitor", "val_loss")
+        monitor_mode = trial_config["trainer"].get("monitor_mode", "min")
+
+        early_stopping_callback = L.pytorch.callbacks.EarlyStopping(
+            monitor=monitor_metric,
             patience=trial_config["trainer"]["early_stopping_patience"],
-            mode=trial_config["trainer"]["monitor_mode"],
+            mode=monitor_mode,
             verbose=False,
         )
-        callbacks = [in_memory_callback, early_stopping_callback]
+
+        checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            save_top_k=1,
+            save_weights_only=True,
+            dirpath=None,
+            filename=f"best_model_trial_{trial.number if trial else 'na'}_fold_{inner_fold_idx}",
+        )
+        callbacks = [early_stopping_callback, checkpoint_callback]
 
         trainer = build_trainer_fn(
             trial_config,
@@ -83,16 +97,20 @@ def objective(
             callbacks=callbacks,
         )
 
-        scaler = get_fitted_scaler(trial_config, inner_train)
+        scaler = get_fitted_scaler(trial_config, inner_train_df)
         use_csv_flag = trial_config.get("data", {}).get("use_csv", False)
 
         if scaler is not None:
             scaler_save_dir = os.path.join(
-                trial_config["dir"]["scaler_save_path"], f"fold_{inner_fold_idx}"
+                trial_config["dir"].get(
+                    "scaler_save_path", "results/default_scaler_path"
+                ),
+                f"trial_{trial.number if trial else 'N_A'}",
+                f"outer_fold_TODO",
+                f"inner_fold_{inner_fold_idx}",
             )
             os.makedirs(scaler_save_dir, exist_ok=True)
             save_scaler(scaler, os.path.join(scaler_save_dir, "scaler.pkl"))
-            logger.info(f"Scaler saved for inner_fold {inner_fold_idx}.")
         else:
             if use_csv_flag:
                 logger.error(
@@ -112,7 +130,7 @@ def objective(
 
         scaled_inner_train = do_scaling(
             trial_config.get("data", {}).get("columns_to_scale", []),
-            inner_train,
+            inner_train_df,
             scaler,
         )
         logger.info(
@@ -124,7 +142,9 @@ def objective(
             )
 
         scaled_inner_val = do_scaling(
-            trial_config.get("data", {}).get("columns_to_scale", []), inner_val, scaler
+            trial_config.get("data", {}).get("columns_to_scale", []),
+            inner_val_df,
+            scaler,
         )
         train_dataloader = build_data_fn(trial_config, scaled_inner_train, mode="train")
         logger.info(
@@ -213,28 +233,82 @@ def objective(
             )
             raise
 
-        if debug or True:
-            logger.info(f"[INFO] 최종모델 검증 시작 (inner_fold {inner_fold_idx})")
-        metrics = trainer.test(model, val_dataloader)
-        inner_scores.append(metrics["test_auroc"])
+        loaded_best_weights = False
+        if (
+            hasattr(checkpoint_callback, "best_model_state_dict")
+            and checkpoint_callback.best_model_state_dict
+        ):
+            try:
+                model.load_state_dict(checkpoint_callback.best_model_state_dict)
+                logger.info(
+                    f"[Objective] Inner Fold {inner_fold_idx}: Loaded best model weights from ModelCheckpoint's in-memory state_dict for testing."
+                )
+                loaded_best_weights = True
+            except Exception as e:
+                logger.warning(
+                    f"[Objective] Inner Fold {inner_fold_idx}: Failed to load from best_model_state_dict: {e}. Trying path if available."
+                )
 
-        # InMemoryBestModelSaver.best_epoch는 텐서일 수 있으므로 .item()으로 Python 숫자로 변환
-        current_best_epoch = in_memory_callback.best_epoch
-        if torch.is_tensor(current_best_epoch):
-            best_epochs.append(current_best_epoch.item())
-        elif isinstance(current_best_epoch, (int, float)):
-            best_epochs.append(current_best_epoch)  # 이미 숫자면 그대로 사용
-        else:  # 예상치 못한 타입이면 -1 또는 적절한 기본값 사용 및 경고
+        if (
+            not loaded_best_weights
+            and checkpoint_callback.best_model_path
+            and os.path.exists(checkpoint_callback.best_model_path)
+        ):
+            try:
+                checkpoint = torch.load(checkpoint_callback.best_model_path)
+                if "state_dict" in checkpoint:
+                    model.load_state_dict(checkpoint["state_dict"])
+                    logger.info(
+                        f"[Objective] Inner Fold {inner_fold_idx}: Loaded best model weights from path {checkpoint_callback.best_model_path} (extracted 'state_dict') for testing."
+                    )
+                    loaded_best_weights = True
+                else:
+                    model.load_state_dict(checkpoint)
+                    logger.info(
+                        f"[Objective] Inner Fold {inner_fold_idx}: Loaded best model weights from path {checkpoint_callback.best_model_path} (assumed raw state_dict) for testing."
+                    )
+                    loaded_best_weights = True
+            except Exception as e:
+                logger.warning(
+                    f"[Objective] Inner Fold {inner_fold_idx}: Failed to load from best_model_path {checkpoint_callback.best_model_path}: {e}. Testing with last model state."
+                )
+
+        if not loaded_best_weights:
             logger.warning(
-                f"Unexpected type for best_epoch: {type(current_best_epoch)}. Storing -1."
+                f"[Objective] Inner Fold {inner_fold_idx}: Could not load best model weights from ModelCheckpoint. Testing with the model's current (last) state."
             )
-            best_epochs.append(-1)
 
-    trial.set_user_attr("inner_scores", inner_scores)
-    trial.set_user_attr("best_epochs", best_epochs)
-    # best_epoch 저장
-    final_score = np.mean(inner_scores)
+        epoch_of_best_or_stop = trainer.current_epoch
+        if early_stopping_callback.stopped_epoch > 0:
+            epoch_of_best_or_stop = early_stopping_callback.stopped_epoch
+        all_inner_best_epochs_approx.append(epoch_of_best_or_stop)
+
+        logger.info(
+            f"[Objective] Inner Fold {inner_fold_idx}: Starting trainer.test() with {'best' if loaded_best_weights else 'last'} model weights. Approx. best epoch: {epoch_of_best_or_stop}"
+        )
+
+        test_results_list = trainer.test(
+            model, dataloaders=val_dataloader, verbose=False
+        )
+        if test_results_list:
+            test_metrics_dict = test_results_list[0]
+            current_test_auroc = test_metrics_dict.get("test_auroc", 0.0)
+        else:
+            logger.warning(
+                f"[Objective] Inner Fold {inner_fold_idx}: trainer.test() returned empty results."
+            )
+            current_test_auroc = 0.0
+
+        inner_scores.append(current_test_auroc)
+        logger.info(
+            f"[Objective] Inner Fold {inner_fold_idx}: test_auroc: {current_test_auroc}"
+        )
+
+    trial.set_user_attr("inner_fold_test_aurocs", inner_scores)
+    trial.set_user_attr("inner_fold_best_epochs_approx", all_inner_best_epochs_approx)
+
+    final_score = np.mean(inner_scores) if inner_scores else 0.0
     logger.info(
-        f"[Objective] Trial finished. Average score over inner folds (val_auc): {final_score}"
+        f"[Objective] Trial {trial.number if trial else 'N/A'} finished. Average test_auroc over inner folds: {final_score}"
     )
     return final_score

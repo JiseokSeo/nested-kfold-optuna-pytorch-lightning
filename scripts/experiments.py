@@ -172,26 +172,45 @@ def run_inner_optuna_search(
 def make_result_report(study, exp_name, outer_folder_num):
     trials_report = []
     for trial in study.trials:
+        # inner_fold_best_epochs_approx는 에포크 값들의 리스트일 수 있음
+        epochs_approx_list = trial.user_attrs.get("inner_fold_best_epochs_approx", [])
+        avg_best_epoch = -1
+        if epochs_approx_list:  # 리스트가 비어있지 않은 경우에만 평균 계산
+            avg_best_epoch = np.mean(epochs_approx_list) if epochs_approx_list else -1
+            # 정수형 에포크가 필요하면 int(np.mean(epochs_approx_list)) 또는 round 사용 가능
+            # 여기서는 float으로 유지하거나, 필요에 따라 int로 변환
+
         trial_report = {
             "trial_number": trial.number,
-            "inner_loop_metric": trial.user_attrs.get("inner_scores", []),
-            "mean_inner_loop_metric": trial.value,
+            # "inner_loop_metric": trial.user_attrs.get("inner_scores", []), # 이전 코드
+            "inner_loop_metric": trial.user_attrs.get(
+                "inner_fold_test_aurocs", []
+            ),  # 수정된 키
+            "mean_inner_loop_metric": trial.value,  # objective 함수의 최종 반환값이므로 유지
             "params": trial.params,
-            "best_epoch": trial.user_attrs.get("best_epoch", -1),
+            # "best_epoch": trial.user_attrs.get("best_epoch", -1), # 이전 코드
+            "best_epoch": avg_best_epoch,  # 계산된 평균 에포크 사용
         }
         trials_report.append(trial_report)
 
-    # 스터디의 best_trial에 대한 best_epoch도 추가
-    best_trial_epoch = -1
+    # 스터디의 best_trial에 대한 best_epoch도 수정
+    best_trial_avg_epoch = -1
     if study.best_trial:
-        best_trial_epoch = study.best_trial.user_attrs.get("best_epoch", -1)
+        best_trial_epochs_list = study.best_trial.user_attrs.get(
+            "inner_fold_best_epochs_approx", []
+        )
+        if best_trial_epochs_list:  # 리스트가 비어있지 않은 경우에만 평균 계산
+            best_trial_avg_epoch = (
+                np.mean(best_trial_epochs_list) if best_trial_epochs_list else -1
+            )
+            # 여기도 필요에 따라 int로 변환 가능
 
     result_report = {
         "exp_name": exp_name,
         "outer_folder_num": outer_folder_num,
         "best_params": study.best_params,
         "best_trial_value": study.best_value,
-        "best_trial_epoch": best_trial_epoch,
+        "best_trial_epoch": best_trial_avg_epoch,
         "trials": trials_report,
     }
     return result_report

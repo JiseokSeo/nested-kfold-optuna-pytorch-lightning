@@ -1,4 +1,8 @@
-from pytorch_lightning.callbacks import Callback
+# This file is no longer used as InMemoryBestModelSaver has been replaced by ModelCheckpoint in objective.py.
+# Kept пусто (empty) to avoid import errors if other parts of the project (not visible here) might still reference it.
+# Consider deleting this file if no other references exist.
+
+from lightning.pytorch.callbacks import Callback
 import copy
 import torch
 import logging
