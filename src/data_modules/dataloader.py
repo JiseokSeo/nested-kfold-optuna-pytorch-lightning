@@ -22,7 +22,6 @@ class CustomDataLoader(DataLoader):
                     "Configuration error: 'data.target_column' is missing in config for CustomDataLoader."
                 )
 
-            # target 컬럼에서 클래스별 weight 계산
             if (
                 not hasattr(dataset, "data")
                 or target_column_name not in dataset.data.columns
@@ -33,45 +32,19 @@ class CustomDataLoader(DataLoader):
 
             targets = np.array(dataset.data[target_column_name])
             class_sample_count = np.bincount(targets.astype(int))
-            weight = 1.0 / (class_sample_count + 1e-6)
+            weight = 1.0 / (
+                class_sample_count + 1e-6
+            )  # 0으로 나누는 것을 방지하기 위해 작은 값 추가
             samples_weight = weight[targets.astype(int)]
             sampler = WeightedRandomSampler(
                 samples_weight, len(samples_weight), replacement=True
             )
+            # train 모드에서는 WeightedRandomSampler를 사용
             super().__init__(
                 dataset,
                 sampler=sampler,
-                **kwargs,
+                **kwargs,  # batch_size 등 DataLoader의 다른 인자들을 전달
             )
         else:
+            # valid 또는 test 모드에서는 sampler 없이 순차적으로 데이터를 로드 (shuffle=False가 기본값)
             super().__init__(dataset, shuffle=False, **kwargs)
-
-    def __iter__(self):
-        if self.mode == "train":
-            for batch in super().__iter__():
-                # 배치가 dict/list/tuple 등 다양한 형태일 수 있으므로, 길이 체크를 유연하게 처리
-                batch_size = None
-                if isinstance(batch, dict):
-                    # dict일 경우, 첫 번째 텐서의 batch 차원
-                    first_tensor = next(iter(batch.values()))
-                    batch_size = (
-                        first_tensor.size(0)
-                        if hasattr(first_tensor, "size")
-                        else len(first_tensor)
-                    )
-                elif isinstance(batch, (list, tuple)):
-                    # 리스트/튜플일 경우, 첫 번째 요소의 batch 차원
-                    first_tensor = batch[0]
-                    batch_size = (
-                        first_tensor.size(0)
-                        if hasattr(first_tensor, "size")
-                        else len(first_tensor)
-                    )
-                else:
-                    # 기타: 텐서 자체가 배치일 수도 있음
-                    batch_size = batch.size(0) if hasattr(batch, "size") else len(batch)
-                if batch_size == 1:
-                    continue  # 배치사이즈 1이면 스킵
-                yield batch
-        else:
-            yield from super().__iter__()

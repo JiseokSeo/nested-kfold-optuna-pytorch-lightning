@@ -52,7 +52,7 @@ def test_best_params(reproducible: bool = True):
 
 def main(need_search=True, need_test=False):
     if need_search:
-        search_best_params(debug=True)
+        search_best_params(debug=False)
     if need_test:
         # test_best_params 호출 시에는 항상 재현성을 True로 하거나, 별도 인자로 관리합니다.
         # 여기서는 일단 test_best_params 내부에서 True로 고정한다고 가정합니다.
