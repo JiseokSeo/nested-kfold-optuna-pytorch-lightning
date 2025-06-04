@@ -1,3 +1,4 @@
+import os
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 import torch
@@ -20,14 +21,14 @@ def build_trainer_from_config(
 
     logger_name = exp_name
     if fold_idx is not None:
-        logger_name = f"{exp_name}/fold_{fold_idx}"
+        logger_name = os.path.join(exp_name, f"fold_{fold_idx}")
 
     logger = TensorBoardLogger(
         save_dir=log_save_dir, name=logger_name, default_hp_metric=False
     )
     # TensorBoardLogger 객체에 .info()를 호출하는 대신, 파일 스코프의 로거를 사용
     builder_file_logger.info(
-        f"[TrainerBuilder] TensorBoardLogger (PTL) created at {log_save_dir}/{logger_name}"
+        f"[TrainerBuilder] TensorBoardLogger (PTL) created at {os.path.join(log_save_dir, logger_name)}"
     )
 
     torch.backends.cudnn.benchmark = not reproducible

@@ -17,7 +17,7 @@ from scripts.experiments import run_experiments
 def search_best_params(
     reproducible: bool = False, debug: bool = False
 ):  # reproducible 인자 추가
-    experiments_config = collect_expriments_config("configs/")
+    experiments_config = collect_expriments_config(os.path.join("configs"))
 
     all_exp_params = {}
     for experiment_config in experiments_config:  # 모든 실험 반복
@@ -27,7 +27,7 @@ def search_best_params(
             debug=debug,  # reproducible 인자 전달
         )
         all_exp_params[experiment_config["experiment_name"]] = exp_params
-    save_json(all_exp_params, "result/all_exp_params.json")
+    save_json(all_exp_params, os.path.join("result", "all_exp_params.json"))
 
 
 def test_best_params(reproducible: bool = True):

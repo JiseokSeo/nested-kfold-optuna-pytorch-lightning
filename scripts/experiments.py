@@ -27,7 +27,7 @@ def run_experiments(experiment_config, reproducible: bool = False, debug: bool =
     각 fold별로 Optuna 탐색 결과(result_report)를 수집하고 파일로 저장.
     """
     experiment_name = experiment_config["experiment_name"]
-    log_dir = f"result/{experiment_name}/logs/log"
+    log_dir = os.path.join("result", experiment_name, "logs", "log")
     log_path = os.path.join(log_dir, "experiment_run.log")
     logger = get_logger(log_path)
     if debug:
@@ -88,7 +88,10 @@ def run_experiments(experiment_config, reproducible: bool = False, debug: bool =
 
     save_json(
         experiment_result,
-        f"{experiment_config['dir']['result_save_path']}/{experiment_config['experiment_name']}_best_params.json",
+        os.path.join(
+            experiment_config['dir']['result_save_path'],
+            f"{experiment_config['experiment_name']}_best_params.json"
+        ),
     )
     return experiment_result
 
@@ -164,7 +167,7 @@ def run_inner_optuna_search(
     )
 
     parameter_save_path = config["dir"]["parameter_save_path"]
-    save_json(result_report, f"{parameter_save_path}/{study_name}.json")
+    save_json(result_report, os.path.join(parameter_save_path, f"{study_name}.json"))
 
     return result_report
 
